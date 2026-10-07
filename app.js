@@ -51,6 +51,7 @@ let currentItems = [];
 let databasePromise;
 let isSaving = false;
 const quantityUpdates = new Map();
+const deletingItems = new Set();
 
 function openDatabase() {
   if (databasePromise) return databasePromise;
@@ -142,6 +143,7 @@ async function updateQuantity(id, delta) {
 }
 
 function changeQuantity(id, delta) {
+  if (deletingItems.has(id)) return Promise.resolve();
   // 同じ商品の連続タップも順番に処理し、表示の逆転を防ぎます。
   const previous = quantityUpdates.get(id) || Promise.resolve();
   const pending = previous.then(async () => {
@@ -168,6 +170,55 @@ function changeQuantity(id, delta) {
   return pending;
 }
 
+async function deleteItem(id) {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    store.delete(id);
+    const remaining = store.getAll();
+    transaction.oncomplete = () => resolve(remaining.result);
+    // abort完了まで待ち、削除失敗時には画面を変更しません。
+    transaction.onabort = () => reject(transaction.error || new Error("削除に失敗しました。"));
+  });
+}
+
+function confirmItemDeletion(id, card) {
+  if (deletingItems.has(id) || managementBusy) return Promise.resolve();
+  if (isSaving) {
+    inventoryMessage.textContent = "商品の保存が終わってから、もう一度お試しください。";
+    inventoryMessage.hidden = false;
+    return Promise.resolve();
+  }
+  if (!window.confirm("このカードを削除しますか")) return Promise.resolve();
+  deletingItems.add(id);
+  card.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+  const previous = quantityUpdates.get(id) || Promise.resolve();
+  const pending = previous.then(async () => {
+    let items;
+    try {
+      items = await deleteItem(id);
+    } catch (error) {
+      inventoryMessage.textContent = "商品を削除できませんでした。商品データは変更されていません。もう一度お試しください。";
+      inventoryMessage.hidden = false;
+      card.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+      return;
+    }
+    // DBコミット後だけ再描画。在庫と買い物の両方から削除商品が消えます。
+    try { renderInventory(items); }
+    catch {
+      inventoryMessage.textContent = "商品は削除しましたが、表示を更新できませんでした。再読み込みしてください。";
+      inventoryMessage.hidden = false;
+    }
+  });
+  quantityUpdates.set(id, pending);
+  pending.then(() => {
+    deletingItems.delete(id);
+    if (quantityUpdates.get(id) === pending) quantityUpdates.delete(id);
+  });
+  return pending;
+}
+
 function renderInventory(items) {
   currentItems = items;
   inventoryList.replaceChildren();
@@ -187,6 +238,17 @@ function renderInventory(items) {
     card.querySelector(".increase-button").setAttribute("aria-label", `${item.name}を1個増やす`);
     card.querySelector(".decrease-button").addEventListener("click", () => changeQuantity(item.id, -1));
     card.querySelector(".increase-button").addEventListener("click", () => changeQuantity(item.id, 1));
+    const moreButton = card.querySelector(".card-more");
+    const deleteAction = card.querySelector(".card-delete-action");
+    moreButton.setAttribute("aria-label", `${item.name}の操作`);
+    moreButton.addEventListener("click", () => {
+      deleteAction.hidden = !deleteAction.hidden;
+      moreButton.setAttribute("aria-expanded", String(!deleteAction.hidden));
+    });
+    card.querySelector(".card-delete").addEventListener("click", () => confirmItemDeletion(item.id, card));
+    if (deletingItems.has(item.id)) {
+      card.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+    }
     inventoryList.append(card);
   });
   renderShoppingList(items);
@@ -239,6 +301,11 @@ function readFormItem() {
 addButton.addEventListener("click", async (event) => {
   event.preventDefault();
   if (isSaving || addButton.disabled) return;
+  if (deletingItems.size) {
+    formMessage.textContent = "商品の削除が終わってから、もう一度お試しください。";
+    formMessage.hidden = false;
+    return;
+  }
   formMessage.hidden = true;
   let item;
   try {

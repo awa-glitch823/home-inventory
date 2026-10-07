@@ -17,9 +17,11 @@
         <div id="inventory-list" class="product-list"></div>
         <template id="inventory-card-template">
           <article class="product-card inventory-card">
+            <button type="button" class="card-more" aria-expanded="false">…</button>
             <div class="product-image" aria-hidden="true"></div>
             <div class="product-details"><h2></h2><p class="category"></p><div class="product-meta"><span class="stock-label"></span><span class="reorder-label"></span></div></div>
             <div class="quantity-control" role="group"><button type="button" class="decrease-button">−</button><span class="quantity"><span class="quantity-value"></span><span class="quantity-unit">個</span></span><button type="button" class="increase-button">＋</button></div>
+            <div class="card-delete-action" hidden><button type="button" class="card-delete">このカードを削除する</button></div>
           </article>
         </template>
       </section>

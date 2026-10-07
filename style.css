@@ -53,3 +53,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .data-actions #data-abort { border-color: var(--border); background: #fff; color: var(--muted); }
 .data-actions button:disabled { opacity: .5; cursor: wait; }
 #data-message { white-space: pre-line; overflow-wrap: anywhere; }
+
+/* 商品削除：既存配置を維持し、操作ボタンだけ右上に追加。 */
+.inventory-card { position: relative; }
+.inventory-card .product-details h2 { padding-right: 36px; }
+.card-more { position: absolute; top: 4px; right: 4px; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font-size: 24px; cursor: pointer; }
+.card-delete-action { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 12px; }
+.card-delete { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: #dc2626; font-size: 13px; cursor: pointer; }
+.card-more:disabled, .card-delete:disabled { opacity: .5; cursor: wait; }
