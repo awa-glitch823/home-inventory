@@ -19,33 +19,34 @@
           <article class="product-card inventory-card">
             <button type="button" class="card-more" aria-expanded="false">…</button>
             <div class="product-image" aria-hidden="true"></div>
-            <div class="product-details"><h2></h2><p class="category"></p><div class="product-meta"><span class="stock-label"></span><span class="reorder-label"></span></div></div>
+            <div class="product-details"><h2><span class="item-name"></span><span class="shopping-target" hidden>買い物対象</span></h2><p class="category"></p><div class="product-meta"><span class="stock-label"></span><span class="reorder-label"></span></div></div>
             <div class="quantity-control" role="group"><button type="button" class="decrease-button">−</button><span class="quantity"><span class="quantity-value"></span><span class="quantity-unit">個</span></span><button type="button" class="increase-button">＋</button></div>
-            <div class="card-delete-action" hidden><button type="button" class="card-delete">このカードを削除する</button></div>
+            <p class="card-error field-error" role="alert" hidden></p><div class="card-delete-action" hidden><button type="button" class="card-edit">商品情報を編集する</button><button type="button" class="card-delete">このカードを削除する</button></div>
           </article>
         </template>
       </section>
       <section id="shopping" class="screen" aria-labelledby="shopping-title" hidden>
         <h1 id="shopping-title">買い物リスト</h1>
+        <div id="shopping-progress" hidden><p id="shopping-count"></p><progress id="shopping-bar" max="1" value="0" aria-label="買い物の進捗"></progress><p id="shopping-complete" hidden>すべてチェック済みです！</p></div>
         <p id="shopping-message" class="field-help" role="status">読み込み中…</p>
         <div id="shopping-list" class="product-list"></div>
         <template id="shopping-card-template">
           <article class="product-card shopping-card">
             <div class="product-image" aria-hidden="true"></div>
-            <div class="product-details"><h2></h2><p class="category"></p><div class="product-meta"><span class="stock-label"></span><span class="reorder-label"></span></div></div>
-            <label class="basket-control"><input type="checkbox"><span>かごに<br>入れた</span></label>
+            <div class="product-details"><h2><span class="item-name"></span></h2><p class="category"></p><div class="product-meta"><span class="stock-label"></span><span class="reorder-label"></span></div></div>
+            <div class="basket-control"><label class="checkbox-hit"><input type="checkbox"></label><span>かごに<br>入れた</span><p class="check-error field-error" role="alert" hidden></p></div>
           </article>
         </template>
       </section>
       <section id="add" class="screen" aria-labelledby="add-title" hidden>
         <h1 id="add-title">商品追加</h1>
         <div id="add-form" class="add-form" role="group" aria-labelledby="add-title">
-          <div class="form-field"><label for="product-name">商品名</label><input id="product-name" disabled name="product-name" type="text" placeholder="例：キッチンペーパー"></div>
-          <div class="form-field"><label for="product-category">カテゴリ</label><select id="product-category" disabled name="product-category"><option value="トイレ">トイレ</option><option value="洗面所">洗面所</option><option value="お風呂">お風呂</option><option value="キッチン">キッチン</option><option value="洗濯">洗濯</option><option value="掃除">掃除</option><option value="その他">その他</option></select></div>
-          <div class="form-field"><label for="initial-stock">在庫（初期値）</label><div class="number-field"><input id="initial-stock" disabled name="initial-stock" type="number" min="0" step="1" value="0" inputmode="numeric"><span>個</span></div></div>
-          <div class="form-field"><label for="reorder-point">発注点</label><div class="number-field"><input id="reorder-point" disabled name="reorder-point" type="number" min="0" step="1" value="0" inputmode="numeric" aria-describedby="reorder-help"><span>個</span></div><p id="reorder-help" class="field-help">この数量以下になったら買い物リストに表示されます。</p></div>
+          <div class="form-field"><label for="product-name">商品名</label><input id="product-name" aria-describedby="name-error" disabled name="product-name" type="text" placeholder="例：キッチンペーパー"><p id="name-error" class="field-error" role="alert" hidden></p></div>
+          <div class="form-field"><label for="product-category">カテゴリ</label><select id="product-category" disabled name="product-category" aria-describedby="category-error"></select><p id="category-error" class="field-error" role="alert" hidden></p></div>
+          <div class="form-field"><label for="initial-stock">在庫（初期値）</label><div class="number-field"><input id="initial-stock" aria-describedby="quantity-error" disabled name="initial-stock" type="number" min="0" step="1" value="0" inputmode="numeric"><span>個</span></div><p id="quantity-error" class="field-error" role="alert" hidden></p></div>
+          <div class="form-field"><label for="reorder-point">発注点</label><div class="number-field"><input id="reorder-point" aria-describedby="reorder-error reorder-help" disabled name="reorder-point" type="number" min="0" step="1" value="0" inputmode="numeric"><span>個</span></div><p id="reorder-error" class="field-error" role="alert" hidden></p><p id="reorder-help" class="field-help">この数量以下になったら買い物リストに表示されます。</p></div>
           <p id="form-message" class="field-help" role="alert" hidden></p>
-          <button class="add-button" type="button" disabled>追加</button>
+          <button class="add-button" type="button" disabled>追加</button><button id="edit-cancel" class="edit-cancel" type="button" hidden>編集をキャンセル</button>
         </div>
       </section>
       <section id="settings" class="screen" aria-labelledby="settings-title" hidden>

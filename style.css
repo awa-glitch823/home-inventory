@@ -61,3 +61,33 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .card-delete-action { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 12px; }
 .card-delete { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: #dc2626; font-size: 13px; cursor: pointer; }
 .card-more:disabled, .card-delete:disabled { opacity: .5; cursor: wait; }
+
+/* Ver.2：カテゴリ表示と編集・進捗。既存の白いカードと安全領域は維持。 */
+.product-list { gap: 30px; }
+.category-group { min-width: 0; }
+.category-heading { display: flex; align-items: center; gap: 9px; margin: 0 0 14px; font-size: 15px; font-weight: 650; }
+.category-dot { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: var(--category-color); }
+.category-items { display: grid; gap: 14px; }
+.category-group .product-card { border-left: 3px solid var(--category-color); }
+.item-name { overflow-wrap: anywhere; }
+.shopping-target { display: inline; margin-left: 8px; font-size: 11px; font-weight: 400; color: inherit; white-space: nowrap; }
+.inventory-card .product-details h2 { font-size: 16px; }
+.card-highlight { outline: 2px solid var(--accent); outline-offset: 2px; scroll-margin-bottom: calc(100px + env(safe-area-inset-bottom, 0px)); }
+.card-edit, .edit-cancel { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--muted); font-size: 13px; cursor: pointer; }
+.card-edit { margin-bottom: 10px; }
+.field-error { margin: 0; color: #b91c1c; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.card-error { grid-column: 1 / -1; }
+input[aria-invalid="true"], select[aria-invalid="true"] { border-color: #b91c1c; }
+.quantity-control button:disabled { border-color: #e5e7eb; color: #b6b6bd; background: #f4f4f5; }
+.add-button:disabled { opacity: .45; }
+.basket-control { cursor: default; gap: 0; }
+.checkbox-hit { display: grid; place-items: center; width: 44px; height: 44px; cursor: pointer; }
+.basket-control input { width: 24px; height: 24px; }
+.check-error { grid-column: 1 / -1; font-size: 10px; }
+#shopping-progress { margin-bottom: 26px; }
+#shopping-count { font-size: 13px; color: var(--muted); margin: 0 0 10px; }
+#shopping-bar { display: block; width: 100%; height: 8px; border: 0; border-radius: 8px; overflow: hidden; accent-color: var(--accent); background: #e5e7eb; }
+#shopping-bar::-webkit-progress-bar { background: #e5e7eb; border-radius: 8px; }
+#shopping-bar::-webkit-progress-value { background: var(--accent); border-radius: 8px; }
+#shopping-bar::-moz-progress-bar { background: var(--accent); }
+#shopping-complete { margin: 12px 0 0; font-size: 13px; }

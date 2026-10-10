@@ -1,45 +1,22 @@
 "use strict";
 
-// 商品の正データはIndexedDBに保存し、保存完了後に画面を更新します。
-const screens = document.querySelectorAll(".screen");
-const navButtons = document.querySelectorAll(".nav-button");
-let managementUI = null;
-let managementBusy = false;
-let managementState = { stage: "idle", target: null, verifiedItems: null };
-
-function showScreen(screenId) {
-  if (!document.getElementById(screenId)?.classList.contains("screen")) return;
-  if (managementBusy) return;
-  if (screenId !== "settings" && managementUI) resetDataManagement();
-
-  screens.forEach((screen) => {
-    screen.hidden = screen.id !== screenId;
-  });
-
-  navButtons.forEach((button) => {
-    const isActive = button.dataset.screen === screenId;
-    button.classList.toggle("is-active", isActive);
-    if (isActive) {
-      button.setAttribute("aria-current", "page");
-    } else {
-      button.removeAttribute("aria-current");
-    }
-  });
-
-  window.scrollTo(0, 0);
-}
-
-navButtons.forEach((button) => {
-  button.addEventListener("click", () => showScreen(button.dataset.screen));
-});
-
-showScreen("inventory");
-
+// カテゴリの順序・色はここだけで管理します。
+const CATEGORY_CONFIG = [
+  { name: "キッチン", color: "#22c55e" }, { name: "トイレ", color: "#3b82f6" },
+  { name: "洗面所", color: "#06b6d4" }, { name: "お風呂", color: "#a855f7" },
+  { name: "洗濯", color: "#f59e0b" }, { name: "掃除", color: "#ef4444" },
+  { name: "その他", color: "#9ca3af" }
+];
+const CATEGORIES = CATEGORY_CONFIG.map((category) => category.name);
 const DB_NAME = "homeInventoryDB";
 const STORE_NAME = "items";
-const CATEGORIES = ["トイレ", "洗面所", "お風呂", "キッチン", "洗濯", "掃除", "その他"];
+const CHECK_STORE_NAME = "shoppingChecks";
+const DB_VERSION = 2;
+const screens = document.querySelectorAll(".screen");
+const navButtons = document.querySelectorAll(".nav-button");
 const form = document.getElementById("add-form");
 const addButton = form.querySelector(".add-button");
+const cancelEditButton = document.getElementById("edit-cancel");
 const formMessage = document.getElementById("form-message");
 const inventoryMessage = document.getElementById("inventory-message");
 const inventoryList = document.getElementById("inventory-list");
@@ -47,318 +24,378 @@ const cardTemplate = document.getElementById("inventory-card-template");
 const shoppingList = document.getElementById("shopping-list");
 const shoppingMessage = document.getElementById("shopping-message");
 const shoppingCardTemplate = document.getElementById("shopping-card-template");
+const fields = { name: document.getElementById("product-name"), category: document.getElementById("product-category"),
+  quantity: document.getElementById("initial-stock"), reorderPoint: document.getElementById("reorder-point") };
+const fieldErrors = { name: document.getElementById("name-error"), category: document.getElementById("category-error"),
+  quantity: document.getElementById("quantity-error"), reorderPoint: document.getElementById("reorder-error") };
 let currentItems = [];
+let checkedIds = new Set();
 let databasePromise;
+let appReady = false;
 let isSaving = false;
-const quantityUpdates = new Map();
-const deletingItems = new Set();
+let managementUI = null;
+let managementBusy = false;
+let managementState = { stage: "idle", target: null, verifiedItems: null };
+let editingItem = null;
+let pendingWrites = 0;
+let writeQueue = Promise.resolve();
+const cardErrors = new Map();
+const checkErrors = new Map();
+
+function normalizedName(name) { return name.trim().toLowerCase(); }
+function shoppingTarget(item) { return item.quantity <= item.reorderPoint; }
+function formValues() {
+  return { name: fields.name.value.trim(), category: fields.category.value,
+    quantity: fields.quantity.value === "" ? NaN : Number(fields.quantity.value),
+    reorderPoint: fields.reorderPoint.value === "" ? NaN : Number(fields.reorderPoint.value) };
+}
+function formChanged() {
+  if (!editingItem) return false;
+  const value = formValues();
+  return Object.keys(value).some((key) => value[key] !== (key === "name" ? editingItem.name.trim() : editingItem[key]));
+}
+function clearFormErrors() {
+  Object.keys(fields).forEach((key) => { fieldErrors[key].hidden = true; fields[key].removeAttribute("aria-invalid"); });
+  formMessage.hidden = true;
+}
+function displayFieldError(key, message) {
+  fieldErrors[key].textContent = message;
+  fieldErrors[key].hidden = false;
+  fields[key].setAttribute("aria-invalid", "true");
+}
+function resetForm() {
+  editingItem = null;
+  fields.name.value = ""; fields.category.value = CATEGORIES[0]; fields.quantity.value = "0"; fields.reorderPoint.value = "0";
+  document.getElementById("add-title").textContent = "商品追加";
+  addButton.textContent = "追加"; cancelEditButton.hidden = true; clearFormErrors();
+}
+function showScreen(id, force = false) {
+  if (!document.getElementById(id)?.classList.contains("screen")) return false;
+  if (!force && (managementBusy || isSaving || pendingWrites)) return false;
+  if (editingItem && id !== "add") {
+    if (!force && formChanged() && !window.confirm("変更を破棄しますか？")) return false;
+    resetForm();
+  }
+  if (id !== "settings" && managementUI) resetDataManagement();
+  screens.forEach((screen) => { screen.hidden = screen.id !== id; });
+  navButtons.forEach((button) => {
+    const active = button.dataset.screen === id;
+    button.classList.toggle("is-active", active);
+    if (active) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+  });
+  window.scrollTo(0, 0);
+  syncControls();
+  return true;
+}
+navButtons.forEach((button) => button.addEventListener("click", () => showScreen(button.dataset.screen)));
+
+function syncControls() {
+  const locked = !appReady || managementBusy || isSaving;
+  Object.values(fields).forEach((field) => { field.disabled = locked; });
+  addButton.disabled = locked || pendingWrites > 0 || (editingItem && !formChanged());
+  cancelEditButton.disabled = locked || pendingWrites > 0;
+  navButtons.forEach((button) => { button.disabled = managementBusy || isSaving || pendingWrites > 0; });
+  inventoryList.querySelectorAll(".inventory-card").forEach((card) => {
+    const item = currentItems.find((entry) => entry.id === Number(card.dataset.itemId));
+    if (!item) return;
+    card.querySelector(".decrease-button").disabled = locked || item.quantity <= 0;
+    card.querySelector(".increase-button").disabled = locked || item.quantity >= 9999;
+    [".card-more", ".card-edit", ".card-delete"].forEach((selector) => { card.querySelector(selector).disabled = locked || pendingWrites > 0; });
+  });
+  shoppingList.querySelectorAll("input").forEach((input) => { input.disabled = locked || pendingWrites > 0; });
+}
 
 function openDatabase() {
   if (databasePromise) return databasePromise;
   databasePromise = new Promise((resolve, reject) => {
-    if (!window.indexedDB) {
-      reject(new Error("IndexedDBを利用できません。"));
-      return;
-    }
-    const request = window.indexedDB.open(DB_NAME, 1);
+    if (!window.indexedDB) { reject(new Error("IndexedDBを利用できません。")); return; }
+    const request = window.indexedDB.open(DB_NAME, DB_VERSION);
     let blocked = false;
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        // DBが一意の連番idを採番します。将来、項目を追加できます。
-        db.createObjectStore(STORE_NAME, { keyPath: "id", autoIncrement: true });
-      }
+      if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME, { keyPath: "id", autoIncrement: true });
+      // 既存itemsは変更しません。チェックだけ別ストアへ保存します。
+      if (!db.objectStoreNames.contains(CHECK_STORE_NAME)) db.createObjectStore(CHECK_STORE_NAME, { keyPath: "itemId" });
     };
     request.onsuccess = () => {
       const db = request.result;
       if (blocked) { db.close(); return; }
-      db.onversionchange = () => { db.close(); databasePromise = undefined; };
-      db.onclose = () => { databasePromise = undefined; };
+      db.onversionchange = () => { db.close(); databasePromise = undefined; appReady = false; syncControls(); };
+      db.onclose = () => { databasePromise = undefined; appReady = false; syncControls(); };
       resolve(db);
     };
     request.onerror = () => reject(request.error);
-    request.onblocked = () => {
-      blocked = true;
-      reject(new Error("他のタブを閉じて再読み込みしてください。"));
-    };
-  }).catch((error) => {
-    databasePromise = undefined;
-    throw error;
-  });
+    request.onblocked = () => { blocked = true; reject(new Error("他のタブを閉じて再読み込みしてください。")); };
+  }).catch((error) => { databasePromise = undefined; throw error; });
   return databasePromise;
 }
-
 async function readItems() {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, "readonly");
-    const request = transaction.objectStore(STORE_NAME).getAll();
-    transaction.oncomplete = () => resolve(request.result);
-    transaction.onabort = () => reject(transaction.error || new Error("読み込みに失敗しました。"));
-    transaction.onerror = () => reject(transaction.error || request.error);
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const request = tx.objectStore(STORE_NAME).getAll();
+    tx.oncomplete = () => resolve(request.result);
+    tx.onabort = () => reject(tx.error || new Error("商品を読み込めませんでした。"));
   });
 }
-
-async function saveItem(item) {
+async function readState() {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, "readwrite");
-    const request = transaction.objectStore(STORE_NAME).add(item);
-    // リクエスト成功だけでなく、保存トランザクション完了を待ちます。
-    transaction.oncomplete = () => resolve({ ...item, id: request.result });
-    transaction.onabort = () => reject(transaction.error || new Error("保存に失敗しました。"));
-    transaction.onerror = () => reject(transaction.error || request.error);
+    const tx = db.transaction([STORE_NAME, CHECK_STORE_NAME], "readonly");
+    const items = tx.objectStore(STORE_NAME).getAll(), checks = tx.objectStore(CHECK_STORE_NAME).getAll();
+    tx.oncomplete = () => resolve({ items: items.result, checks: checks.result });
+    tx.onabort = () => reject(tx.error || new Error("データを読み込めませんでした。"));
   });
 }
-
-// 最新数量の取得と更新を同じトランザクションで行い、他の商品は変更しません。
-async function updateQuantity(id, delta) {
+// 読み取り・検証・更新・チェックの解除を同じトランザクションで実施。
+async function mutateState(action) {
+  if (!appReady) throw new Error("初期化が完了していません。");
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, "readwrite");
-    const store = transaction.objectStore(STORE_NAME);
-    const request = store.get(id);
-    let updatedItem;
-    let validationError;
-    request.onsuccess = () => {
-      const item = request.result;
-      if (!item || !Number.isSafeInteger(item.quantity) || item.quantity < 0) {
-        validationError = new Error("商品の在庫データを確認できませんでした。");
-        transaction.abort();
-        return;
-      }
-      const quantity = Math.max(0, item.quantity + delta);
-      if (!Number.isSafeInteger(quantity)) {
-        validationError = new Error("在庫数量が上限に達しています。");
-        transaction.abort();
-        return;
-      }
-      updatedItem = { ...item, quantity };
-      store.put(updatedItem);
+    const tx = db.transaction([STORE_NAME, CHECK_STORE_NAME], "readwrite");
+    const items = tx.objectStore(STORE_NAME), checks = tx.objectStore(CHECK_STORE_NAME);
+    const initialItems = items.getAll(), initialChecks = checks.getAll();
+    let finalItems, finalChecks, result, reason;
+    tx.oncomplete = () => resolve({ items: finalItems.result, checks: finalChecks.result, result });
+    tx.onabort = () => reject(reason || tx.error || new Error("保存に失敗しました。"));
+    initialChecks.onsuccess = () => {
+      try {
+        result = action({ items, checks, data: initialItems.result, checked: initialChecks.result });
+        finalItems = items.getAll(); finalChecks = checks.getAll();
+      } catch (error) { reason = error; tx.abort(); }
     };
-    transaction.oncomplete = () => resolve(updatedItem);
-    transaction.onabort = () => reject(validationError || transaction.error || new Error("在庫を保存できませんでした。"));
-    transaction.onerror = () => reject(transaction.error || new Error("在庫を保存できませんでした。"));
   });
 }
-
-function changeQuantity(id, delta) {
-  if (deletingItems.has(id)) return Promise.resolve();
-  // 同じ商品の連続タップも順番に処理し、表示の逆転を防ぎます。
-  const previous = quantityUpdates.get(id) || Promise.resolve();
-  const pending = previous.then(async () => {
-    try {
-      const item = await updateQuantity(id, delta);
-      // 保存中にカードが再生成されても、現在の対象カードだけを更新します。
-      const card = Array.from(inventoryList.children).find((element) => Number(element.dataset.itemId) === id);
-      if (card) {
-        card.querySelector(".stock-label").textContent = `在庫 ${item.quantity}個`;
-        card.querySelector(".quantity-value").textContent = item.quantity;
-      }
-      inventoryMessage.hidden = true;
-      currentItems = currentItems.map((existing) => existing.id === item.id ? item : existing);
-      renderShoppingList(currentItems);
-    } catch (error) {
-      inventoryMessage.textContent = "在庫を保存できませんでした。数量は変更していません。もう一度お試しください。";
-      inventoryMessage.hidden = false;
+function queueWrite(task) {
+  pendingWrites++; syncControls();
+  const pending = writeQueue.then(task);
+  writeQueue = pending.catch(() => {});
+  return pending.finally(() => { pendingWrites--; syncControls(); });
+}
+function validateInput(value, original = null) {
+  const errors = {};
+  if (!value.name) errors.name = "商品名を入力してください。";
+  else if ((!original || value.name !== original.name.trim()) && Array.from(value.name).length > 50) errors.name = "商品名は50文字以内で入力してください。";
+  if (!CATEGORIES.includes(value.category)) errors.category = "カテゴリを選択してください。";
+  for (const key of ["quantity", "reorderPoint"]) {
+    if ((!original || value[key] !== original[key]) && (!Number.isInteger(value[key]) || value[key] < 0 || value[key] > 9999)) {
+      errors[key] = "0～9999の整数を入力してください。";
     }
-  });
-  quantityUpdates.set(id, pending);
-  pending.then(() => {
-    if (quantityUpdates.get(id) === pending) quantityUpdates.delete(id);
-  });
-  return pending;
+  }
+  return errors;
 }
-
+async function persistItem(value, original = null) {
+  return mutateState(({ items, checks, data }) => {
+    const existing = original ? data.find((entry) => entry.id === original.id) : null;
+    if (original && !existing) throw new Error("商品が見つかりません。再読み込みしてください。");
+    if (original && !deepEqual(existing, original)) throw new Error("商品が別の画面で変更されました。編集を開き直してください。");
+    const errors = validateInput(value, existing);
+    if (Object.keys(errors).length) { const error = new Error("入力内容を確認してください。"); error.fields = errors; throw error; }
+    const identityChanged = !existing || value.name !== existing.name.trim() || value.category !== existing.category;
+    if (identityChanged && data.some((entry) => entry.id !== existing?.id && entry.category === value.category && normalizedName(entry.name) === normalizedName(value.name))) {
+      const error = new Error("同じカテゴリに同じ商品名があります。"); error.fields = { name: error.message }; throw error;
+    }
+    const saved = existing ? { ...existing, ...value, name: value.name === existing.name.trim() ? existing.name : value.name } : value;
+    const request = existing ? items.put(saved) : items.add(saved);
+    if (existing && !shoppingTarget(saved)) checks.delete(existing.id);
+    return request;
+  });
+}
+async function updateQuantity(id, delta) {
+  return mutateState(({ items, checks, data }) => {
+    const item = data.find((entry) => entry.id === id);
+    if (!item) throw new Error("商品が見つかりません。");
+    if ((delta < 0 && item.quantity === 0) || (delta > 0 && item.quantity >= 9999)) return;
+    const quantity = Math.max(0, item.quantity + delta);
+    const updated = { ...item, quantity };
+    items.put(updated);
+    if (!shoppingTarget(updated)) checks.delete(id);
+  });
+}
 async function deleteItem(id) {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, "readwrite");
-    const store = transaction.objectStore(STORE_NAME);
-    store.delete(id);
-    const remaining = store.getAll();
-    transaction.oncomplete = () => resolve(remaining.result);
-    // abort完了まで待ち、削除失敗時には画面を変更しません。
-    transaction.onabort = () => reject(transaction.error || new Error("削除に失敗しました。"));
+  return mutateState(({ items, checks }) => { items.delete(id); checks.delete(id); });
+}
+async function setChecked(id, checked) {
+  return mutateState(({ data, checks }) => {
+    const item = data.find((entry) => entry.id === id);
+    if (!item || !shoppingTarget(item)) { checks.delete(id); return; }
+    if (checked) checks.put({ itemId: id }); else checks.delete(id);
   });
 }
 
-function confirmItemDeletion(id, card) {
-  if (deletingItems.has(id) || managementBusy) return Promise.resolve();
-  if (isSaving) {
-    inventoryMessage.textContent = "商品の保存が終わってから、もう一度お試しください。";
-    inventoryMessage.hidden = false;
-    return Promise.resolve();
+function visibleAnchor(root) {
+  const cards = Array.from(root.querySelectorAll(".product-card"));
+  const index = cards.findIndex((card) => card.getBoundingClientRect().bottom > 0);
+  if (index < 0) return null;
+  return cards.slice(index).map((card) => ({ id: Number(card.dataset.itemId), top: card.getBoundingClientRect().top }));
+}
+function keepPosition(root, render) {
+  const anchor = root.closest(".screen")?.hidden ? null : visibleAnchor(root);
+  const y = window.scrollY;
+  render();
+  if (anchor) {
+    for (const previous of anchor) {
+      const card = root.querySelector('[data-item-id="' + previous.id + '"]');
+      if (card) { window.scrollBy(0, card.getBoundingClientRect().top - previous.top); return; }
+    }
+    window.scrollTo(0, y);
   }
-  if (!window.confirm("このカードを削除しますか")) return Promise.resolve();
-  deletingItems.add(id);
-  card.querySelectorAll("button").forEach((button) => { button.disabled = true; });
-  const previous = quantityUpdates.get(id) || Promise.resolve();
-  const pending = previous.then(async () => {
-    let items;
-    try {
-      items = await deleteItem(id);
-    } catch (error) {
-      inventoryMessage.textContent = "商品を削除できませんでした。商品データは変更されていません。もう一度お試しください。";
-      inventoryMessage.hidden = false;
-      card.querySelectorAll("button").forEach((button) => { button.disabled = false; });
-      return;
-    }
-    // DBコミット後だけ再描画。在庫と買い物の両方から削除商品が消えます。
-    try { renderInventory(items); }
-    catch {
-      inventoryMessage.textContent = "商品は削除しましたが、表示を更新できませんでした。再読み込みしてください。";
-      inventoryMessage.hidden = false;
-    }
-  });
-  quantityUpdates.set(id, pending);
-  pending.then(() => {
-    deletingItems.delete(id);
-    if (quantityUpdates.get(id) === pending) quantityUpdates.delete(id);
-  });
-  return pending;
 }
-
-function renderInventory(items) {
+function focusCard(id) {
+  requestAnimationFrame(() => {
+    const card = inventoryList.querySelector('[data-item-id="' + id + '"]');
+    if (!card) return;
+    card.scrollIntoView({ block: "center", behavior: "auto" });
+    card.classList.add("card-highlight");
+    setTimeout(() => card.classList.remove("card-highlight"), 2000);
+  });
+}
+function categoryGroup(category, count, checked = null) {
+  const section = document.createElement("section"); section.className = "category-group";
+  section.style.setProperty("--category-color", category.color);
+  const heading = document.createElement("h2"); heading.className = "category-heading";
+  const dot = document.createElement("span"); dot.className = "category-dot"; dot.setAttribute("aria-hidden", "true");
+  heading.append(dot, document.createTextNode(category.name + "（" + (checked === null ? count : checked + "/" + count) + "件）"));
+  const list = document.createElement("div"); list.className = "category-items";
+  section.append(heading, list); return { section, list };
+}
+function setProductText(card, item) {
+  card.dataset.itemId = item.id;
+  card.querySelector(".item-name").textContent = item.name;
+  card.querySelector(".category").textContent = item.category;
+  card.querySelector(".stock-label").textContent = "在庫 " + item.quantity + "個";
+  card.querySelector(".reorder-label").textContent = "発注点 " + item.reorderPoint + "個";
+}
+function renderInventory(items = currentItems) {
   currentItems = items;
-  inventoryList.replaceChildren();
-  inventoryMessage.textContent = "まだ商品はありません";
-  inventoryMessage.hidden = items.length > 0;
-  items.forEach((item) => {
-    const card = cardTemplate.content.firstElementChild.cloneNode(true);
-    card.dataset.itemId = item.id;
-    // 入力をHTMLとして解釈させず、文字として安全に表示します。
-    card.querySelector("h2").textContent = item.name;
-    card.querySelector(".category").textContent = item.category;
-    card.querySelector(".stock-label").textContent = `在庫 ${item.quantity}個`;
-    card.querySelector(".reorder-label").textContent = `発注点 ${item.reorderPoint}個`;
-    card.querySelector(".quantity-value").textContent = item.quantity;
-    card.querySelector(".quantity-control").setAttribute("aria-label", `${item.name}の在庫数量`);
-    card.querySelector(".decrease-button").setAttribute("aria-label", `${item.name}を1個減らす`);
-    card.querySelector(".increase-button").setAttribute("aria-label", `${item.name}を1個増やす`);
-    card.querySelector(".decrease-button").addEventListener("click", () => changeQuantity(item.id, -1));
-    card.querySelector(".increase-button").addEventListener("click", () => changeQuantity(item.id, 1));
-    const moreButton = card.querySelector(".card-more");
-    const deleteAction = card.querySelector(".card-delete-action");
-    moreButton.setAttribute("aria-label", `${item.name}の操作`);
-    moreButton.addEventListener("click", () => {
-      deleteAction.hidden = !deleteAction.hidden;
-      moreButton.setAttribute("aria-expanded", String(!deleteAction.hidden));
-    });
-    card.querySelector(".card-delete").addEventListener("click", () => confirmItemDeletion(item.id, card));
-    if (deletingItems.has(item.id)) {
-      card.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+  keepPosition(inventoryList, () => {
+    inventoryList.replaceChildren(); inventoryMessage.hidden = items.length > 0;
+    inventoryMessage.textContent = "まだ商品はありません";
+    for (const category of CATEGORY_CONFIG) {
+      const groupItems = items.filter((item) => item.category === category.name).sort((a, b) => a.id - b.id);
+      if (!groupItems.length) continue;
+      const group = categoryGroup(category, groupItems.length);
+      for (const item of groupItems) {
+        const card = cardTemplate.content.firstElementChild.cloneNode(true); setProductText(card, item);
+        card.querySelector(".shopping-target").hidden = !shoppingTarget(item);
+        card.querySelector(".quantity-value").textContent = item.quantity;
+        card.querySelector(".quantity-control").setAttribute("aria-label", item.name + "の在庫数量");
+        for (const [selector, delta, label] of [[".decrease-button", -1, "減らす"], [".increase-button", 1, "増やす"]]) {
+          const button = card.querySelector(selector); button.setAttribute("aria-label", item.name + "を1個" + label);
+          button.addEventListener("click", () => changeQuantity(item.id, delta));
+        }
+        const more = card.querySelector(".card-more"), menu = card.querySelector(".card-delete-action");
+        more.setAttribute("aria-label", item.name + "の操作");
+        more.addEventListener("click", () => { menu.hidden = !menu.hidden; more.setAttribute("aria-expanded", String(!menu.hidden)); });
+        card.querySelector(".card-edit").addEventListener("click", () => startEditing(item.id));
+        card.querySelector(".card-delete").addEventListener("click", () => confirmItemDeletion(item.id));
+        const error = card.querySelector(".card-error"); error.hidden = !cardErrors.has(item.id); error.textContent = cardErrors.get(item.id) || "";
+        group.list.append(card);
+      }
+      inventoryList.append(group.section);
     }
-    inventoryList.append(card);
   });
-  renderShoppingList(items);
+  syncControls();
 }
-
-// 買い物リストはitemsの表示結果。専用データやチェック状態は保存しません。
-function renderShoppingList(items) {
-  // 同じページ内の再描画では、表示中の商品だけチェックを引き継ぎます。
-  const checkedIds = new Set(Array.from(shoppingList.children)
-    .filter((card) => card.querySelector("input").checked)
-    .map((card) => Number(card.dataset.itemId)));
-  const shoppingItems = items.filter((item) => item.quantity <= item.reorderPoint);
-  shoppingList.replaceChildren();
-  shoppingMessage.textContent = "買い物リストはまだありません";
-  shoppingMessage.hidden = shoppingItems.length > 0;
-  shoppingItems.forEach((item) => {
-    const card = shoppingCardTemplate.content.firstElementChild.cloneNode(true);
-    card.dataset.itemId = item.id;
-    card.querySelector("h2").textContent = item.name;
-    card.querySelector(".category").textContent = item.category;
-    card.querySelector(".stock-label").textContent = `在庫 ${item.quantity}個`;
-    card.querySelector(".reorder-label").textContent = `発注点 ${item.reorderPoint}個`;
-    const checkbox = card.querySelector("input");
-    checkbox.setAttribute("aria-label", `${item.name}をかごに入れた`);
-    checkbox.checked = checkedIds.has(item.id);
-    // チェックのオン／オフはブラウザー標準動作のみ。数量変更処理なし。
-    shoppingList.append(card);
+function renderShoppingList(items = currentItems) {
+  const target = items.filter(shoppingTarget);
+  const done = target.filter((item) => checkedIds.has(item.id)).length;
+  document.getElementById("shopping-progress").hidden = target.length === 0;
+  document.getElementById("shopping-count").textContent = done + "／" + target.length + "件 チェック済み";
+  document.getElementById("shopping-bar").max = target.length || 1;
+  document.getElementById("shopping-bar").value = done;
+  document.getElementById("shopping-complete").hidden = !target.length || done !== target.length;
+  shoppingMessage.textContent = "現在、買い物が必要な商品はありません"; shoppingMessage.hidden = target.length > 0;
+  keepPosition(shoppingList, () => {
+    shoppingList.replaceChildren();
+    for (const category of CATEGORY_CONFIG) {
+      const groupItems = target.filter((item) => item.category === category.name)
+        .sort((a, b) => Number(checkedIds.has(a.id)) - Number(checkedIds.has(b.id)) || a.id - b.id);
+      if (!groupItems.length) continue;
+      const group = categoryGroup(category, groupItems.length, groupItems.filter((item) => checkedIds.has(item.id)).length);
+      for (const item of groupItems) {
+        const card = shoppingCardTemplate.content.firstElementChild.cloneNode(true); setProductText(card, item);
+        const checkbox = card.querySelector("input"); checkbox.checked = checkedIds.has(item.id);
+        checkbox.setAttribute("aria-label", item.name + "をかごに入れた");
+        checkbox.addEventListener("change", () => changeChecked(item.id, checkbox.checked));
+        const error = card.querySelector(".check-error"); error.hidden = !checkErrors.has(item.id); error.textContent = checkErrors.get(item.id) || "";
+        group.list.append(card);
+      }
+      shoppingList.append(group.section);
+    }
+  });
+  syncControls();
+}
+function applyState(state) {
+  currentItems = state.items;
+  checkedIds = new Set(state.checks.filter((check) => state.items.some((item) => item.id === check.itemId && shoppingTarget(item))).map((check) => check.itemId));
+  renderInventory(); renderShoppingList();
+}
+function changeQuantity(id, delta) {
+  if (!appReady || isSaving || managementBusy) return Promise.resolve();
+  return queueWrite(async () => {
+    try { const state = await updateQuantity(id, delta); cardErrors.delete(id); applyState(state); }
+    catch {
+      cardErrors.set(id, "在庫を保存できませんでした。もう一度お試しください。");
+      try { applyState(await readState()); } catch { renderInventory(); }
+    }
   });
 }
-
-function readFormItem() {
-  const name = document.getElementById("product-name").value.trim();
-  const category = document.getElementById("product-category").value;
-  const stockText = document.getElementById("initial-stock").value.trim();
-  const pointText = document.getElementById("reorder-point").value.trim();
-  const quantity = Number(stockText);
-  const reorderPoint = Number(pointText);
-  if (!name) throw new Error("商品名を入力してください。");
-  if (!CATEGORIES.includes(category)) throw new Error("定義済みのカテゴリを選択してください。");
-  if (!stockText || !Number.isSafeInteger(quantity) || quantity < 0) {
-    throw new Error("在庫は0以上の整数を入力してください。");
-  }
-  if (!pointText || !Number.isSafeInteger(reorderPoint) || reorderPoint < 0) {
-    throw new Error("発注点は0以上の整数を入力してください。");
-  }
-  return { name, category, quantity, reorderPoint };
+function changeChecked(id, checked) {
+  if (!appReady || isSaving || managementBusy || pendingWrites) { renderShoppingList(); return Promise.resolve(); }
+  // ネイティブチェックの先行表示を戻し、保存成功後に反映します。
+  renderShoppingList();
+  return queueWrite(async () => {
+    try { const state = await setChecked(id, checked); checkErrors.delete(id); applyState(state); }
+    catch {
+      checkErrors.set(id, "チェックを保存できませんでした。もう一度お試しください。");
+      try { applyState(await readState()); } catch { renderShoppingList(); }
+    }
+  });
 }
-
-// HTMLのform要素を使わず、ブラウザー標準の送信経路をなくしています。
+function startEditing(id) {
+  if (!appReady || pendingWrites || isSaving || managementBusy) return;
+  const item = currentItems.find((entry) => entry.id === id); if (!item) return;
+  editingItem = { ...item }; clearFormErrors();
+  Object.keys(fields).forEach((key) => { fields[key].value = item[key]; });
+  document.getElementById("add-title").textContent = "商品情報を編集";
+  addButton.textContent = "変更を保存"; cancelEditButton.hidden = false;
+  showScreen("add"); syncControls();
+}
+function confirmItemDeletion(id) {
+  if (!appReady || pendingWrites || isSaving || managementBusy || !window.confirm("このカードを削除しますか")) return Promise.resolve();
+  return queueWrite(async () => {
+    try { const state = await deleteItem(id); cardErrors.delete(id); checkErrors.delete(id); applyState(state); }
+    catch { cardErrors.set(id, "商品を削除できませんでした。商品は変更されていません。"); renderInventory(); }
+  });
+}
+Object.values(fields).forEach((field) => field.addEventListener("input", () => { clearFormErrors(); syncControls(); }));
+fields.category.addEventListener("change", () => { clearFormErrors(); syncControls(); });
+cancelEditButton.addEventListener("click", () => { showScreen("inventory"); });
 addButton.addEventListener("click", async (event) => {
-  event.preventDefault();
-  if (isSaving || addButton.disabled) return;
-  if (deletingItems.size) {
-    formMessage.textContent = "商品の削除が終わってから、もう一度お試しください。";
-    formMessage.hidden = false;
-    return;
-  }
-  formMessage.hidden = true;
-  let item;
+  event.preventDefault(); if (!appReady || isSaving || pendingWrites || managementBusy || addButton.disabled) return;
+  clearFormErrors(); const value = formValues(), original = editingItem;
+  const errors = validateInput(value, original);
+  if (Object.keys(errors).length) { Object.entries(errors).forEach(([key, message]) => displayFieldError(key, message)); return; }
+  isSaving = true; syncControls(); addButton.textContent = "保存中…";
+  let savedId;
   try {
-    item = readFormItem();
+    await queueWrite(async () => {
+      const state = await persistItem(value, original);
+      savedId = state.result.result; applyState(state);
+    });
+    resetForm();
   } catch (error) {
-    formMessage.textContent = error.message;
-    formMessage.hidden = false;
-    return;
-  }
-  isSaving = true;
-  addButton.disabled = true;
-  addButton.textContent = "保存中…";
-  try {
-    // 最新の保存データを取得。失敗時には登録を開始しません。
-    const items = await readItems();
-    const savedItem = await saveItem(item);
-    renderInventory([...items, savedItem]);
-    document.getElementById("product-name").value = "";
-    document.getElementById("product-category").selectedIndex = 0;
-    document.getElementById("initial-stock").value = "0";
-    document.getElementById("reorder-point").value = "0";
-    showScreen("inventory");
-  } catch (error) {
-    formMessage.textContent = "保存できませんでした。入力内容は残っています。ブラウザーの保存設定を確認して、もう一度お試しください。";
-    formMessage.hidden = false;
+    if (error.fields) Object.entries(error.fields).forEach(([key, message]) => displayFieldError(key, message));
+    else { formMessage.textContent = "保存できませんでした。入力内容は残っています。"; formMessage.hidden = false; }
   } finally {
-    isSaving = false;
-    addButton.disabled = false;
-    addButton.textContent = "追加";
+    isSaving = false; addButton.textContent = editingItem ? "変更を保存" : "追加"; syncControls();
   }
+  if (savedId !== undefined) { showScreen("inventory"); focusCard(savedId); }
 });
-
 form.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.isComposing && event.target.tagName === "INPUT") {
-    event.preventDefault();
-    if (!addButton.disabled) addButton.click();
-  }
+  if (event.key === "Enter" && !event.isComposing && event.target.tagName === "INPUT") { event.preventDefault(); if (!addButton.disabled) addButton.click(); }
 });
-
-async function initializeInventory() {
-  try {
-    renderInventory(await readItems());
-    return true;
-  } catch (error) {
-    inventoryMessage.hidden = false;
-    inventoryMessage.textContent = "在庫を読み込めませんでした。他のタブやブラウザーの保存設定を確認し、再読み込みしてください。";
-    shoppingMessage.hidden = false;
-    shoppingMessage.textContent = "買い物リストを読み込めませんでした。再読み込みしてください。";
-    formMessage.textContent = "初期化できませんでした。再読み込みしてください。";
-    formMessage.hidden = false;
-    return false;
-  }
-}
 
 // バックアップ／復元。一時状態はメモリーだけに保持します。
 const BACKUP_APP_ID = "home_inventory";
@@ -389,9 +426,9 @@ function renderDataActions() {
   managementUI.abort.hidden = stage === "idle";
   managementUI.abort.textContent = stage === "backupVerify" ? "バックアップ中断" : "復元中断";
   for (const key of ["export", "select", "confirm", "verify", "finish", "abort"]) {
-    managementUI[key].disabled = managementBusy;
+    managementUI[key].disabled = managementBusy || !appReady || isSaving || pendingWrites > 0;
   }
-  navButtons.forEach((button) => { button.disabled = managementBusy; });
+  navButtons.forEach((button) => { button.disabled = managementBusy || isSaving || pendingWrites > 0; });
 }
 
 function resetDataManagement(message = "") {
@@ -403,7 +440,7 @@ function resetDataManagement(message = "") {
 
 async function dataTask(task) {
   if (managementBusy) return;
-  if (isSaving || quantityUpdates.size) {
+  if (!appReady || isSaving || pendingWrites) {
     dataMessage("商品の保存処理が終わってから、もう一度お試しください。");
     return;
   }
@@ -533,7 +570,7 @@ function chooseBackupFile() {
 
 managementUI.export.addEventListener("click", () => dataTask(() => exportBackup(false)));
 managementUI.select.addEventListener("click", () => {
-  if (managementBusy) return;
+  if (managementBusy || !appReady || pendingWrites || isSaving) return;
   managementState.stage = "restoreSelect";
   managementState.target = null;
   managementState.verifiedItems = null;
@@ -583,7 +620,7 @@ async function restoreItems(target, expectedItems) {
   validateBackup(target, false);
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const transaction = db.transaction([STORE_NAME, CHECK_STORE_NAME], "readwrite");
     const store = transaction.objectStore(STORE_NAME);
     let reason;
     transaction.oncomplete = () => resolve();
@@ -598,6 +635,7 @@ async function restoreItems(target, expectedItems) {
           return;
         }
         store.clear();
+        transaction.objectStore(CHECK_STORE_NAME).clear();
         // ここでawaitしない。IDを維持し、失敗したリクエストはデフォルト動作で全体をabort。
         target.items.forEach((item) => store.put(item));
       } catch (error) {
@@ -622,18 +660,29 @@ managementUI.finish.addEventListener("click", () => dataTask(async () => {
   }
   // DBコミットと表示処理を区別。表示失敗をロールバック成功と誤表示しません。
   resetDataManagement(target.items.length + "件の商品を復元しました。");
+  cardErrors.clear(); checkErrors.clear();
   try {
-    shoppingList.replaceChildren();
-    renderInventory(await readItems());
+    applyState(await readState());
   } catch {
     dataMessage(target.items.length + "件の商品を復元しました。画面の更新に失敗したため、再読み込みしてください。");
   }
 }));
 renderDataActions();
 
-// 全イベント登録とIndexedDB読み込みが完了した場合だけ入力を許可します。
-initializeInventory().then((initialized) => {
-  if (!initialized) return;
-  form.querySelectorAll("input, select").forEach((control) => { control.disabled = false; });
-  addButton.disabled = false;
-});
+
+// すべてのイベント登録後に読込。失敗時は書き込みを許可しません。
+async function initializeApp() {
+  try {
+    fields.category.replaceChildren();
+    CATEGORY_CONFIG.forEach((category) => { const option = document.createElement("option"); option.value = category.name; option.textContent = category.name; fields.category.append(option); });
+    resetForm(); applyState(await readState()); appReady = true; syncControls(); renderDataActions();
+  } catch {
+    appReady = false; syncControls();
+    inventoryMessage.hidden = false; inventoryMessage.textContent = "データを読み込めませんでした。他のタブを閉じて再読み込みしてください。";
+    shoppingMessage.hidden = false; shoppingMessage.textContent = "データを読み込めませんでした。再読み込みしてください。";
+    formMessage.hidden = false; formMessage.textContent = "初期化できませんでした。再読み込みしてください。";
+    renderDataActions();
+  }
+}
+showScreen("inventory");
+initializeApp();
