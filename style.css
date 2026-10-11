@@ -68,7 +68,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .category-heading { display: flex; align-items: center; gap: 9px; margin: 0 0 14px; font-size: 15px; font-weight: 650; }
 .category-dot { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: var(--category-color); }
 .category-items { display: grid; gap: 14px; }
-.category-group .product-card { border-left: 3px solid var(--category-color); }
+/* 外周の1pxグレー枠を残し、その内側だけにカテゴリラインを描画。 */
+.category-group .product-card {
+  background: linear-gradient(to right, var(--category-color) 0 6px, #fff 6px) padding-box;
+  padding-left: 18px; /* 左枠が3px→1pxになる分を補い、内容の位置を維持。 */
+}
+@media (max-width: 359px) { .category-group .product-card { padding-left: 14px; } }
 .item-name { overflow-wrap: anywhere; }
 .shopping-target { display: inline; margin-left: 8px; font-size: 11px; font-weight: 400; color: inherit; white-space: nowrap; }
 .inventory-card .product-details h2 { font-size: 16px; }
