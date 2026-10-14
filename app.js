@@ -44,10 +44,16 @@ const checkErrors = new Map();
 
 function normalizedName(name) { return name.trim().toLowerCase(); }
 function shoppingTarget(item) { return item.quantity <= item.reorderPoint; }
+function quantityInputValue(field) {
+  // number入力の不正文字が空文字に見える場合も、未入力とは区別します。
+  if (field.validity?.badInput) return NaN;
+  if (field.value === "") return 0;
+  return String(field.value).trim() === "" ? NaN : Number(field.value);
+}
 function formValues() {
   return { name: fields.name.value.trim(), category: fields.category.value,
-    quantity: fields.quantity.value === "" ? NaN : Number(fields.quantity.value),
-    reorderPoint: fields.reorderPoint.value === "" ? NaN : Number(fields.reorderPoint.value) };
+    quantity: quantityInputValue(fields.quantity),
+    reorderPoint: quantityInputValue(fields.reorderPoint) };
 }
 function formChanged() {
   if (!editingItem) return false;
@@ -65,7 +71,7 @@ function displayFieldError(key, message) {
 }
 function resetForm() {
   editingItem = null;
-  fields.name.value = ""; fields.category.value = CATEGORIES[0]; fields.quantity.value = "0"; fields.reorderPoint.value = "0";
+  fields.name.value = ""; fields.category.value = CATEGORIES[0]; fields.quantity.value = ""; fields.reorderPoint.value = "";
   document.getElementById("add-title").textContent = "商品追加";
   addButton.textContent = "追加"; cancelEditButton.hidden = true; clearFormErrors();
 }
